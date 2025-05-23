@@ -9,7 +9,7 @@ app.use(cors());
 
 const server = http.createServer(app);
 const io = socketIO(server, {
-  cors: { origin: '*' }, // Update for production
+  cors: { origin: '*' },
 });
 
 let currentOI = 50000;
@@ -23,7 +23,7 @@ setInterval(() => {
 
 // Simulate dummy volume changes
 setInterval(() => {
-  const change = Math.random() * 5; // random volume increment
+  const change = Math.random() * 5;
   currentVolume = Math.max(0, currentVolume + change);
 }, 1000);
 
@@ -32,11 +32,11 @@ app.get('/', (req, res) => {
 });
 
 app.get('/oi', (req, res) => {
-  res.json({ oi: currentOI.toFixed(2) });
+  res.json({ oi: +currentOI.toFixed(2) }); // return number
 });
 
 app.get('/volume', (req, res) => {
-  res.json({ volume: currentVolume.toFixed(2) });
+  res.json({ volume: +currentVolume.toFixed(2) }); // return number
 });
 
 // Signal logic
@@ -46,48 +46,77 @@ function processSignal(price, oi, topBidQty, topAskQty) {
   return 'NEUTRAL';
 }
 
-const binanceSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
-let latestPrice = 0;
+// Initialize as null until data arrives
+let latestPrice = null;
+let topBids = null;
+let topAsks = null;
 
-binanceSocket.on('message', (data) => {
-  const trade = JSON.parse(data);
-  latestPrice = parseFloat(trade.p);
-});
+function connectTradeSocket() {
+  const socket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade');
 
-binanceSocket.on('error', (err) => {
-  console.error('Binance trade socket error:', err);
-});
-binanceSocket.on('close', () => {
-  console.warn('Binance trade socket closed.');
-});
+  socket.on('open', () => console.log('Binance trade socket connected'));
 
-const orderBookSocket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@depth5@100ms');
-let topBids = [];
-let topAsks = [];
+  socket.on('message', (data) => {
+    const trade = JSON.parse(data);
+    latestPrice = parseFloat(trade.p);
+  });
 
-orderBookSocket.on('message', (data) => {
-  const orderBook = JSON.parse(data);
+  socket.on('close', () => {
+    console.warn('Binance trade socket closed, reconnecting in 3s...');
+    setTimeout(connectTradeSocket, 3000);
+  });
 
-  topBids = orderBook.bids
-    .filter(bid => parseFloat(bid[1]) > 0)
-    .slice(0, 3)
-    .map(bid => ({ price: parseFloat(bid[0]), qty: parseFloat(bid[1]) }));
+  socket.on('error', (err) => {
+    console.error('Binance trade socket error:', err);
+    socket.close();
+  });
 
-  topAsks = orderBook.asks
-    .filter(ask => parseFloat(ask[1]) > 0)
-    .slice(0, 3)
-    .map(ask => ({ price: parseFloat(ask[0]), qty: parseFloat(ask[1]) }));
-});
+  return socket;
+}
 
-orderBookSocket.on('error', (err) => {
-  console.error('Binance order book socket error:', err);
-});
-orderBookSocket.on('close', () => {
-  console.warn('Binance order book socket closed.');
-});
+function connectOrderBookSocket() {
+  const socket = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@depth5@100ms');
 
-// Emit data every 200ms
+  socket.on('open', () => console.log('Binance order book socket connected'));
+
+  socket.on('message', (data) => {
+    const orderBook = JSON.parse(data);
+
+    topBids = orderBook.bids
+      .filter(bid => parseFloat(bid[1]) > 0)
+      .slice(0, 3)
+      .map(bid => ({ price: parseFloat(bid[0]), qty: parseFloat(bid[1]) }));
+
+    topAsks = orderBook.asks
+      .filter(ask => parseFloat(ask[1]) > 0)
+      .slice(0, 3)
+      .map(ask => ({ price: parseFloat(ask[0]), qty: parseFloat(ask[1]) }));
+  });
+
+  socket.on('close', () => {
+    console.warn('Binance order book socket closed, reconnecting in 3s...');
+    setTimeout(connectOrderBookSocket, 3000);
+  });
+
+  socket.on('error', (err) => {
+    console.error('Binance order book socket error:', err);
+    socket.close();
+  });
+
+  return socket;
+}
+
+// Start the WebSocket connections
+let binanceTradeSocket = connectTradeSocket();
+let binanceOrderBookSocket = connectOrderBookSocket();
+
+// Emit data only when all data is available
 setInterval(() => {
+  if (latestPrice === null || !topBids || !topAsks) {
+    // Skip emitting if data not ready
+    return;
+  }
+
   const topBidQty = topBids[0]?.qty || 0;
   const topAskQty = topAsks[0]?.qty || 0;
   const signal = processSignal(latestPrice, currentOI, topBidQty, topAskQty);
